@@ -44,7 +44,6 @@ if uploaded_file:
             except:
                 continue
 
-        # Optimization model
         prob = pulp.LpProblem("NetworkCargoProfitMaximization", pulp.LpMaximize)
         x_od = pulp.LpVariable.dicts("CargoTons", all_od_paths.keys(), lowBound=0, cat='Continuous')
         prob += pulp.lpSum([x_od[od] * props['cm'] for od, props in all_od_paths.items()]), "TotalProfit"
@@ -52,10 +51,8 @@ if uploaded_file:
             prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs']]) <= cap
         for od, props in all_od_paths.items():
             prob += x_od[od] <= props['max_allocable']
-
         prob.solve()
 
-        # OD summary
         od_summary = []
         for v in prob.variables():
             if v.varValue > 0:
@@ -66,7 +63,6 @@ if uploaded_file:
                 od_summary.append({'OD Pair': od, 'Cargo Tonnage': round(tons, 2), 'CM (₹/ton)': cm, 'Total Profit (₹)': round(profit, 2)})
         df_od_summary = pd.DataFrame(od_summary)
 
-        # Leg breakdown
         records = []
         for od_row in df_od_summary.itertuples():
             od, tons, cm = od_row._1, od_row._2, od_row._3
@@ -78,45 +74,20 @@ if uploaded_file:
                     'Cargo Tonnage': tons,
                     'Profit on Leg (₹)': tons * cm
                 })
-
         df_leg_detail = pd.DataFrame(records)
 
-        # Enhanced Priority Classification
         df_leg_detail['Priority Type'] = "Fills Remaining"
         df_leg_detail['Fill Priority Rank'] = None
 
         for leg, group in df_leg_detail.groupby("Flight Leg"):
-            if len(group) == 1:
-                idx = group.index[0]
-                df_leg_detail.loc[idx, 'Priority Type'] = "Only OD"
-                df_leg_detail.loc[idx, 'Fill Priority Rank'] = 1
-                continue
-
-            top_cm = group["OD CM (₹/ton)"].max()
-
-            # Sort: Highest CM first, then prefer direct if CM is tied
             sorted_group = group.copy()
-            sorted_group['is_direct'] = sorted_group['OD Contributor'].apply(lambda od: len(all_od_paths[od]["legs"]) == 1)
-            sorted_group = sorted_group.sort_values(by=["OD CM (₹/ton)", "is_direct"], ascending=[False, False])
-
+            sorted_group = sorted_group.sort_values(by=["Cargo Tonnage"], ascending=False)
             for rank, idx in enumerate(sorted_group.index, start=1):
-                row = df_leg_detail.loc[idx]
-                od = row["OD Contributor"]
-                cm = row["OD CM (₹/ton)"]
-                is_direct = len(all_od_paths[od]["legs"]) == 1
-                is_highest = cm == top_cm
-
-                if is_highest and is_direct:
-                    label = "Highest CM - Direct"
-                elif is_highest and not is_direct:
-                    label = "Highest CM - Indirect"
-                elif is_direct:
-                    label = "Direct - Lower CM"
-                else:
-                    label = "Indirect - Lower CM"
-
-                df_leg_detail.loc[idx, 'Priority Type'] = label
                 df_leg_detail.loc[idx, 'Fill Priority Rank'] = rank
+                if len(group) == 1:
+                    df_leg_detail.loc[idx, 'Priority Type'] = "Only OD"
+                else:
+                    df_leg_detail.loc[idx, 'Priority Type'] = "Based on Cargo Tonnage"
 
         df_leg_summary = df_leg_detail.groupby('Flight Leg')['Cargo Tonnage'].sum().reset_index(name='Total Tonnage (Tons)')
         total_profit = pulp.value(prob.objective)
@@ -130,14 +101,25 @@ if uploaded_file:
             'Fill Priority Rank': ''
         }])
 
-        st.subheader("📦 OD Allocation Summary")
-        st.dataframe(df_od_summary)
-
-        st.subheader("✈️ Leg Breakdown (with Priority Type & Rank)")
-        st.dataframe(df_leg_detail)
+        # Tabs for structured output
+        tab1, tab2, tab3, tab4 = st.tabs(["📂 Input Sheets", "📦 OD Allocation", "✈️ Leg Breakdown", "📊 Summary & Download"])
+        with tab1:
+            st.subheader("Direct Routes (Input)")
+            st.dataframe(direct_routes)
+            st.subheader("Indirect Routes (Input)")
+            st.dataframe(indirect_routes)
+        with tab2:
+            st.dataframe(df_od_summary)
+        with tab3:
+            st.dataframe(df_leg_detail)
+        with tab4:
+            st.dataframe(df_leg_summary)
+            st.markdown(f"### ✅ Total Network Profit: ₹ {round(total_profit, 2):,.2f}")
 
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            direct_routes.to_excel(writer, index=False, sheet_name="Direct_Routes_Input")
+            indirect_routes.to_excel(writer, index=False, sheet_name="Indirect_Routes_Input")
             df_od_summary.to_excel(writer, index=False, sheet_name="OD_Allocations")
             df_leg_detail.to_excel(writer, index=False, sheet_name="Leg_Breakdown")
             df_leg_summary.to_excel(writer, index=False, sheet_name="Leg_Summary")
